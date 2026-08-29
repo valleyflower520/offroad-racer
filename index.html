@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>越野竞速 - 伪3D 原型（网页版）</title>
+  <style>
+    html,body { height:100%; margin:0; background:#333; display:flex; align-items:center; justify-content:center; }
+    canvas { background:#87CEEB; display:block; border:1px solid #222; }
+    #info { position:fixed; top:10px; left:10px; color:#fff; font-family:Arial, sans-serif; }
+    #hint { position:fixed; top:10px; right:10px; color:#ddd; font-family:Arial, sans-serif; }
+  </style>
+</head>
+<body>
+  <div id="info"></div>
+  <div id="hint">↑加速 ↓刹车 ← → 转向</div>
+  <canvas id="gameCanvas" width="1000" height="700"></canvas>
+
+  <script>
+  // 越野竞速 - 伪3D 原型（浏览器端实现）
+  (function(){
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+    const centerX = Math.floor(W/2);
+    const centerY = Math.floor(H/2);
+
+    // 颜色
+    const COLOR_SKY = '#87CEEB';
+    const COLOR_GRASS = '#228B22';
+    const COLOR_DIRT = '#8B5A2B';
+    const COLOR_ROAD = '#3C3C3C';
+    const COLOR_ROAD_LINE = '#FFFFFF';
+    const COLOR_CAR_BODY = '#C83232';
+    const COLOR_CAR_WINDOW = '#64C8FF';
+
+    // 控件状态
+    const keys = { up:false, down:false, left:false, right:false };
+
+    window.addEventListener('keydown', e => {
+      if(e.code === 'ArrowUp') keys.up = true;
+      if(e.code === 'ArrowDown') keys.down = true;
+      if(e.code === 'ArrowLeft') keys.left = true;
+      if(e.code === 'ArrowRight') keys.right = true;
+    });
+    window.addEventListener('keyup', e => {
+      if(e.code === 'ArrowUp') keys.up = false;
+      if(e.code === 'ArrowDown') keys.down = false;
+      if(e.code === 'ArrowLeft') keys.left = false;
+      if(e.code === 'ArrowRight') keys.right = false;
+    });
+
+    // 游戏状态
+    class GameState {
+      constructor(){
+        this.segment_length = 200;
+        this.num_segments = 50;
+        this.segments = [];
+        this.player_z = 0;
+        this.speed = 0;
+        this.max_speed = 15;
+        this.accel = 0.2;
+        this.brake = 0.15;
+        this.friction = 0.97;
+        this.steering = 0;
+        this.player_x = 0;
+        this.max_x = 3.5;
+        this.camera_height = 1000;
+        this.draw_distance = 120;
+        this.terrain_variation = 0.5;
+
+        this.generate_track();
+      }
+
+      generate_track(){
+        this.segments = [];
+        let world_x = 0;
+        for(let i=0;i<this.num_segments;i++){
+          const curve = 2.5*Math.sin(i*0.15) + 1.0*Math.sin(i*0.05 + 1.2);
+          const height = 0.6*Math.sin(i*0.12) + 0.4*Math.cos(i*0.07 + 0.8);
+          const rumble = (i % 3 === 0) ? 0.3*Math.sin(i*0.3) : 0;
+          world_x += curve;
+          this.segments.push({
+            curve, height, rumble, x_offset: world_x
+          });
+        }
+      }
+
+      segAt(z){
+        return this.segments[(Math.floor(z) % this.num_segments + this.num_segments) % this.num_segments];
+      }
+    }
+
+    const state = new GameState();
+
+    function renderPseudo3D(){
+      // sky
+      ctx.fillStyle = COLOR_SKY;
+      ctx.fillRect(0,0,W,H);
+
+      // distant ground
+      ctx.fillStyle = '#325032';
+      ctx.fillRect(0, H/2, W, H/2);
+
+      // compute start segment
+      const segIndex = Math.floor(state.player_z) % state.num_segments;
+      let start_seg = segIndex;
+      // build seg list
+      const seg_list = [];
+      for(let i = state.draw_distance; i >= 0; i--){
+        const seg_idx = (start_seg - i) % state.num_segments;
+        const seg = state.segments[(seg_idx + state.num_segments) % state.num_segments];
+
+        const rel_dist = i;
+        const world_x = seg.x_offset - state.player_x;
+        const world_y = seg.height * state.terrain_variation;
+
+        const z_scale = state.camera_height / (rel_dist + 0.1);
+        const screen_x = centerX + Math.round(world_x * z_scale * 0.5);
+        const screen_y = Math.round(centerY + (world_y * 80) - (rel_dist * 0.5));
+
+        const segment_width = Math.round(300 * z_scale / 100);
+        if(segment_width < 2) continue;
+
+        seg_list.push({
+          index: i,
+          screen_x, screen_y,
+          width: segment_width,
+          seg_data: seg,
+          rel_dist
+        });
+      }
+
+      // draw from far to near (so nearer covers further)
+      for(let idx = seg_list.length - 1; idx >= 0; idx--){
+        const item = seg_list[idx];
+        const x = item.screen_x;
+        const y = item.screen_y;
+        const w = item.width;
+        const dist = item.rel_dist;
+
+        const dark_factor = Math.max(0.3, 1.0 - dist / state.draw_distance);
+        const roadColor = `rgb(${Math.floor(60*dark_factor)},${Math.floor(60*dark_factor)},${Math.floor(60*dark_factor)})`;
+        const lineColor = `rgb(${Math.floor(200*dark_factor)},${Math.floor(200*dark_factor)},${Math.floor(200*dark_factor)})`;
+
+        const top_width = w;
+        const bottom_width = dist > 0 ? w * 1.2 : w * 0.8;
+        const top_y = y - 10;
+        const bottom_y = y + 15;
+
+        // ground/road body
+        ctx.beginPath();
+        ctx.moveTo(x - bottom_width/2, bottom_y);
+        ctx.lineTo(x + bottom_width/2, bottom_y);
+        ctx.lineTo(x + top_width/2, top_y);
+        ctx.lineTo(x - top_width/2, top_y);
+        ctx.closePath();
+        ctx.fillStyle = (dist > 5) ? COLOR_DIRT : roadColor;
+        ctx.fill();
+
+        // road edges
+        ctx.strokeStyle = (dist > 5) ? '#64461E' : '#505050';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(x - bottom_width/2, bottom_y);
+        ctx.lineTo(x - top_width/2, top_y);
+        ctx.moveTo(x + bottom_width/2, bottom_y);
+        ctx.lineTo(x + top_width/2, top_y);
+        ctx.stroke();
+
+        // center line dashed style
+        if(dist % 4 < 2){
+          ctx.strokeStyle = lineColor;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(x, top_y);
+          ctx.lineTo(x, bottom_y);
+          ctx.stroke();
+        }
+
+        // trees near
+        if(dist < 20 && dist > 2 && dist % 3 === 0){
+          const tree_x = x + (Math.random() < 0.5 ? -w*0.8 : w*0.8);
+          const tree_y = (top_y + bottom_y) / 2;
+          if(tree_x > 0 && tree_x < W){
+            ctx.fillStyle = COLOR_GRASS;
+            ctx.beginPath();
+            ctx.arc(tree_x, tree_y - 5, 8, 0, Math.PI*2);
+            ctx.fill();
+            ctx.fillStyle = '#654321';
+            ctx.fillRect(tree_x-2, tree_y-5, 4, 10);
+          }
+        }
+      }
+
+      // draw car (fixed at bottom center)
+      const car_x = centerX;
+      const car_y = H - 100;
+      ctx.fillStyle = COLOR_CAR_BODY;
+      roundRect(ctx, car_x-20, car_y-10, 40, 25, 6, true, false);
+      ctx.fillStyle = COLOR_CAR_WINDOW;
+      roundRect(ctx, car_x-10, car_y-18, 20, 12, 4, true, false);
+      // wheels
+      ctx.fillStyle = '#1E1E1E';
+      circle(ctx, car_x-15, car_y+12, 6);
+      circle(ctx, car_x+15, car_y+12, 6);
+      // headlights
+      ctx.fillStyle = 'rgb(255,255,150)';
+      circle(ctx, car_x-15, car_y-12, 3);
+      circle(ctx, car_x+15, car_y-12, 3);
+
+      // HUD
+      ctx.fillStyle = '#fff';
+      ctx.font = '20px Arial';
+      const kmh = Math.abs(state.speed * 10);
+      ctx.fillText(`速度: ${Math.round(kmh)} km/h`, 20, 30);
+    }
+
+    function updatePhysics(){
+      // inputs
+      if(keys.up) state.speed += state.accel;
+      if(keys.down) state.speed -= state.brake;
+      state.speed *= state.friction;
+      if(state.speed > state.max_speed) state.speed = state.max_speed;
+      if(state.speed < -state.max_speed/2) state.speed = -state.max_speed/2;
+
+      if(keys.left){
+        state.steering = -0.12 * (1 + Math.abs(state.speed)*0.05);
+      } else if(keys.right){
+        state.steering = 0.12 * (1 + Math.abs(state.speed)*0.05);
+      } else {
+        state.steering *= 0.85;
+      }
+
+      const seg_idx = Math.floor(state.player_z) % state.num_segments;
+      const curve_force = state.segments[(seg_idx + state.num_segments) % state.num_segments].curve * 0.02 * state.speed;
+      state.player_x += state.steering + curve_force;
+
+      if(state.player_x > state.max_x) state.player_x = state.max_x;
+      if(state.player_x < -state.max_x) state.player_x = -state.max_x;
+
+      state.player_z += state.speed * 0.08;
+      if(state.player_z >= state.num_segments) state.player_z -= state.num_segments;
+      if(state.player_z < 0) state.player_z += state.num_segments;
+    }
+
+    // helpers
+    function circle(ctx,x,y,r){ ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fill(); }
+    function roundRect(ctx,x,y,w,h,r,fill,stroke){
+      if(r === undefined) r = 5;
+      ctx.beginPath();
+      ctx.moveTo(x+r, y);
+      ctx.arcTo(x+w, y, x+w, y+h, r);
+      ctx.arcTo(x+w, y+h, x, y+h, r);
+      ctx.arcTo(x, y+h, x, y, r);
+      ctx.arcTo(x, y, x+w, y, r);
+      ctx.closePath();
+      if(fill) ctx.fill();
+      if(stroke) ctx.stroke();
+    }
+
+    // main loop
+    let last = performance.now();
+    function loop(now){
+      const dt = (now - last) / 1000;
+      last = now;
+
+      // We can step physics multiple times if dt large, but here it's simple:
+      updatePhysics();
+      renderPseudo3D();
+
+      requestAnimationFrame(loop);
+    }
+
+    // start
+    requestAnimationFrame(loop);
+
+  })();
+  </script>
+</body>
+</html>
